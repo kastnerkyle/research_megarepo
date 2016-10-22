@@ -1,0 +1,703 @@
+import numpy as np
+import theano
+import theano.tensor as tensor
+from theano.tensor.nnet import conv2d
+from theano.sandbox.rng_mrg import MRG_RandomStreams as RandomStreams
+from scipy.io import wavfile
+import os
+import sys
+from kdllib import make_conv_weights, conv2d_transpose, unpool, softmax, make_biases
+from kdllib import load_checkpoint, dense_to_one_hot, categorical_crossentropy
+from kdllib import fetch_fruitspeech_spectrogram, list_iterator, np_zeros, GRU, GRUFork
+from kdllib import make_weights, as_shared, adam, gradient_clipping, theano_one_hot
+from kdllib import get_values_from_function, set_shared_variables_in_function
+from kdllib import save_checkpoint, save_weights, relu, tanh, soundsc
+from kdllib import run_loop
+
+if __name__ == "__main__":
+    import argparse
+
+    speech = fetch_fruitspeech_spectrogram()
+    X = speech["data"]
+    y = speech["target"]
+    vocabulary = speech["vocabulary"]
+    vocabulary_size = speech["vocabulary_size"]
+    reconstruct = speech["reconstruct"]
+    fs = speech["sample_rate"]
+    X = np.array([x.astype(theano.config.floatX) for x in X])
+    y = np.array([yy.astype(theano.config.floatX) for yy in y])
+
+    minibatch_size = 20
+    n_epochs = 20000  # Used way at the bottom in the training loop!
+    checkpoint_every_n = 500
+    # Was 300 for handwriting
+    cut_len = 31  # Used way at the bottom in the training loop!
+    random_state = np.random.RandomState(1999)
+
+    train_itr = list_iterator([X, y], minibatch_size, axis=1, stop_index=80,
+                              randomize=True, make_mask=True)
+    valid_itr = list_iterator([X, y], minibatch_size, axis=1, start_index=80,
+                              make_mask=True)
+
+    X_mb, X_mb_mask, c_mb, c_mb_mask = next(train_itr)
+    train_itr.reset()
+
+    input_dim = X_mb.shape[-1]
+    n_bins = 10
+    n_kernels = 32
+    conv_size1 = 11
+    conv_size2 = 5
+    deconv_size1 = 5
+    deconv_size2 = 11
+    n_hid = 512
+    att_size = 10
+    n_components = 3
+    n_out = X_mb.shape[-1]
+    n_chars = vocabulary_size
+    # 2 * for magnitude and phase
+    # one for mu, one for sigma then n_components for the mixture weights
+    n_density = 2 * n_components + n_components
+
+    desc = "Speech generation"
+    parser = argparse.ArgumentParser(description=desc)
+    parser.add_argument('-s', '--sample',
+                        help='Sample from a checkpoint file',
+                        default=None,
+                        required=False)
+    parser.add_argument('-p', '--plot',
+                        help='Plot training curves from a checkpoint file',
+                        default=None,
+                        required=False)
+    parser.add_argument('-w', '--write',
+                        help='The string to use',
+                        default=None,
+                        required=False)
+    # http://stackoverflow.com/questions/12116685/how-can-i-require-my-python-scripts-argument-to-be-a-float-between-0-0-1-0-usin
+
+    def restricted_float(x):
+        x = float(x)
+        if x < 0.0:
+            raise argparse.ArgumentTypeError("%r not range [0.0, inf]" % (x,))
+        return x
+    parser.add_argument('-b', '--bias',
+                        help='Bias parameter as a float',
+                        type=restricted_float,
+                        default=.1,
+                        required=False)
+
+    def restricted_int(x):
+        if x is None:
+            # None makes it "auto" sample
+            return x
+        x = int(x)
+        if x < 1:
+            raise argparse.ArgumentTypeError("%r not range [1, inf]" % (x,))
+        return x
+    parser.add_argument('-sl', '--sample_length',
+                        help='Number of steps to sample, default is automatic',
+                        type=restricted_int,
+                        default=None,
+                        required=False)
+    parser.add_argument('-c', '--continue', dest="cont",
+                        help='Continue training from another saved model',
+                        default=None,
+                        required=False)
+    args = parser.parse_args()
+    if args.plot is not None or args.sample is not None:
+        import matplotlib
+        matplotlib.use('Agg')
+        import matplotlib.pyplot as plt
+        if args.sample is not None:
+            checkpoint_file = args.sample
+        else:
+            checkpoint_file = args.plot
+        if not os.path.exists(checkpoint_file):
+            raise ValueError("Checkpoint file path %s" % checkpoint_file,
+                             " does not exist!")
+        print(checkpoint_file)
+        checkpoint_dict = load_checkpoint(checkpoint_file)
+        train_costs = checkpoint_dict["overall_train_costs"]
+        valid_costs = checkpoint_dict["overall_valid_costs"]
+        plt.plot(train_costs)
+        plt.plot(valid_costs)
+        plt.savefig("costs.png")
+
+        X_mb, X_mb_mask, c_mb, c_mb_mask = next(valid_itr)
+        valid_itr.reset()
+
+        prev_h1, prev_h2, prev_h3 = [np_zeros((minibatch_size, n_hid))
+                                     for i in range(3)]
+        prev_kappa = np_zeros((minibatch_size, att_size))
+        prev_w = np_zeros((minibatch_size, n_chars))
+        bias = args.bias
+        if args.sample is not None:
+            predict_function = checkpoint_dict["predict_function"]
+            attention_function = checkpoint_dict["attention_function"]
+            sample_function = checkpoint_dict["sample_function"]
+            if args.write is not None:
+                sample_string = args.write
+                print("Sampling using sample string %s" % sample_string)
+                oh = dense_to_one_hot(
+                    np.array([vocabulary[c] for c in sample_string]),
+                    vocabulary_size)
+                c_mb = np.zeros(
+                    (len(oh), minibatch_size, oh.shape[-1])).astype(c_mb.dtype)
+                c_mb[:len(oh), :, :] = oh[:, None, :]
+                c_mb = c_mb[:len(oh)]
+                c_mb_mask = np.ones_like(c_mb[:, :, 0])
+
+            if args.sample_length is None:
+                raise ValueError("Broken...")
+                # Automatic sampling stop as described in Graves' paper
+                # Assume an average of 30 timesteps per char
+                n_steps = 30 * c_mb.shape[0]
+                step_inc = n_steps
+                max_steps = 25000
+                max_steps_buf = max_steps + n_steps
+                completed = [np.zeros((max_steps_buf, X_mb.shape[-1]))
+                             for i in range(c_mb.shape[1])]
+                max_indices = [None] * c_mb.shape[1]
+                completed_indices = set()
+                # hardcoded upper limit
+                while n_steps < max_steps:
+                    rvals = sample_function(c_mb, c_mb_mask, prev_h1, prev_h2,
+                                            prev_h3, prev_kappa, prev_w, bias,
+                                            n_steps)
+                    sampled, h1_s, h2_s, h3_s, k_s, w_s, stop_s, stop_h = rvals
+                    for i in range(c_mb.shape[1]):
+                        max_ind = None
+                        for j in range(len(stop_s)):
+                            if np.all(stop_h[j, i] > stop_s[j, i]):
+                                max_ind = j
+
+                        if max_ind is not None:
+                            completed_indices = completed_indices | set([i])
+                            completed[i][:max_ind] = sampled[:max_ind, i]
+                            max_indices[i] = max_ind
+                    # if most samples meet the criteria call it good
+                    if len(completed_indices) >= .8 * c_mb.shape[1]:
+                        break
+                    n_steps += step_inc
+                print("Completed auto sampling after %i steps" % n_steps)
+                # cut out garbage
+                completed = [completed[i] for i in completed_indices]
+                cond = c_mb[:, np.array(list(completed_indices))]
+            else:
+                fixed_steps = args.sample_length
+                completed = []
+                for i in range(fixed_steps):
+                    rvals = sample_function(c_mb, c_mb_mask, prev_h1, prev_h2,
+                                            prev_h3, prev_kappa, prev_w, bias)
+                    sampled, h1_s, h2_s, h3_s, k_s, w_s, stop_s, stop_h = rvals
+                    completed.append(sampled)
+                    prev_h1 = h1_s
+                    prev_h2 = h2_s
+                    prev_h3 = h3_s
+                    prev_kappa = k_s
+                    prev_w = w_s
+                cond = c_mb
+                print("Completed sampling after %i steps" % fixed_steps)
+            # Minibatch size first
+            completed = np.array(completed).transpose(1, 0, 2)
+            rlookup = {v: k for k, v in vocabulary.items()}
+            for i in range(len(completed)):
+                ex = completed[i]
+                ex_str = "".join([rlookup[c]
+                                  for c in np.argmax(cond[:, i], axis=1)])
+                s = "gen_%s_%i.wav" % (ex_str, i)
+                ii = reconstruct(ex)
+                wavfile.write(s, fs, soundsc(ii))
+        valid_itr.reset()
+        print("Sampling complete, exiting...")
+        sys.exit()
+    else:
+        print("No plotting arguments, starting training mode!")
+
+    X_sym = tensor.tensor3("X_sym")
+    X_sym.tag.test_value = X_mb[:cut_len]
+    X_mask_sym = tensor.matrix("X_mask_sym")
+    X_mask_sym.tag.test_value = X_mb_mask[:cut_len]
+    c_sym = tensor.tensor3("c_sym")
+    c_sym.tag.test_value = c_mb
+    c_mask_sym = tensor.matrix("c_mask_sym")
+    c_mask_sym.tag.test_value = c_mb_mask
+    bias_sym = tensor.scalar("bias_sym")
+    bias_sym.tag.test_value = 0.
+
+    init_h1 = tensor.matrix("init_h1")
+    init_h1.tag.test_value = np_zeros((minibatch_size, n_hid))
+
+    init_h2 = tensor.matrix("init_h2")
+    init_h2.tag.test_value = np_zeros((minibatch_size, n_hid))
+
+    init_h3 = tensor.matrix("init_h3")
+    init_h3.tag.test_value = np_zeros((minibatch_size, n_hid))
+
+    init_kappa = tensor.matrix("init_kappa")
+    init_kappa.tag.test_value = np_zeros((minibatch_size, att_size))
+
+    init_w = tensor.matrix("init_w")
+    init_w.tag.test_value = np_zeros((minibatch_size, n_chars))
+
+    params = []
+    w_conv1, = make_conv_weights(1, (n_kernels,), (conv_size1, input_dim),
+                                 random_state)
+    b_conv1, = make_biases((n_kernels,))
+    w_conv2, = make_conv_weights(n_kernels, (n_kernels,),
+                                 (conv_size2, 1), random_state)
+    b_conv2, = make_biases((n_kernels,))
+    params += [w_conv1, b_conv1, w_conv2, b_conv2]
+
+    # Use GRU classes only to fork 1 inp to 2 inp:gate pairs
+    conv_to_h1 = GRUFork(n_kernels, n_hid, random_state)
+    conv_to_h2 = GRUFork(n_kernels, n_hid, random_state)
+    params += conv_to_h1.get_params()
+    params += conv_to_h2.get_params()
+
+    cell1 = GRU(n_kernels, n_hid, random_state)
+    cell2 = GRU(n_hid, n_hid, random_state)
+    params += cell1.get_params()
+    params += cell2.get_params()
+
+    # Use GRU classes only to fork 1 inp to 2 inp:gate pairs
+    att_to_h1 = GRUFork(n_chars, n_hid, random_state)
+    att_to_h2 = GRUFork(n_chars, n_hid, random_state)
+    h1_to_h2 = GRUFork(n_hid, n_hid, random_state)
+
+    params += att_to_h1.get_params()
+    params += att_to_h2.get_params()
+    params += h1_to_h2.get_params()
+
+    h1_to_att_a, h1_to_att_b, h1_to_att_k = make_weights(n_hid, 3 * [att_size],
+                                                         random_state)
+    params += [h1_to_att_a, h1_to_att_b, h1_to_att_k]
+
+    # Need a , on single results since it always returns a list
+    # + 1 to force correct upsampling ratio
+    h1_to_outs, = make_weights(n_hid, [input_dim + 1], random_state)
+    h2_to_outs, = make_weights(n_hid, [input_dim + 1], random_state)
+    params += [h1_to_outs, h2_to_outs]
+
+    # n_kernels in output tup is an arbitrary number
+    w_deconv1, = make_conv_weights(1, (n_kernels,),
+                                   (deconv_size1, input_dim + 1),
+                                   random_state)
+    b_deconv1, = make_biases((n_kernels,))
+    w_deconv2, = make_conv_weights(n_kernels, (n_kernels,),
+                                 (deconv_size2, input_dim + 1), random_state)
+    b_deconv2, = make_biases((n_kernels,))
+    w_deconv3, = make_conv_weights(n_kernels, (n_kernels,),
+                                 (deconv_size2, input_dim + 1), random_state)
+    b_deconv3, = make_biases((n_kernels,))
+    params += [w_deconv1, b_deconv1, w_deconv2, b_deconv2, w_deconv3, b_deconv3]
+
+    w_blurconv, = make_conv_weights(n_kernels, (n_kernels,),
+                                   (2 + 1, input_dim + 1),
+                                   random_state)
+
+    w_finalconv, = make_conv_weights(n_kernels, (n_bins,),
+                                    (1, input_dim + 1),
+                                    random_state)
+    params += [w_blurconv, w_finalconv]
+
+    b_softmax, = make_biases((n_bins,))
+    params += [b_softmax]
+
+
+    """
+    # 2 * for mag and phase
+    corr_outs_to_final_outs, = make_weights(1, [2 * n_density],
+                                            random_state)
+    v_outs_to_corr_outs, = make_weights(n_v_hid, [1], random_state)
+    params += [v_outs_to_corr_outs, corr_outs_to_final_outs]
+    """
+
+    inpt = X_sym[:-1]
+    target = X_sym[1:]
+    mask = X_mask_sym[1:]
+    context = c_sym * c_mask_sym.dimshuffle(0, 1, 'x')
+    theano.printing.Print("inpt.shape")(inpt.shape)
+    theano.printing.Print("target.shape")(target.shape)
+
+    inpt = inpt.dimshuffle(1, 'x', 0, 2)
+
+    border_mode = (conv_size1 - 1, 0)
+    conv1 = conv2d(inpt, w_conv1, subsample=(2, 1), border_mode=border_mode)
+    conv1 = conv1 + b_conv1.dimshuffle('x', 0, 'x', 'x')
+    theano.printing.Print("conv1.shape")(conv1.shape)
+
+    border_mode = (conv_size2 - 1, 0)
+    conv2 = conv2d(conv1, w_conv2, subsample=(2, 1), border_mode=border_mode)
+    conv2 = relu(conv2 + b_conv2.dimshuffle('x', 0, 'x', 'x'))
+    theano.printing.Print("conv2.shape")(conv2.shape)
+
+    # Last axis is 1
+    conv_out = conv2[:, :, :, 0].dimshuffle(2, 0, 1)
+    theano.printing.Print("conv_out.shape")(conv_out.shape)
+
+    conv_h1, convgate_h1 = conv_to_h1.proj(conv_out)
+    conv_h2, convgate_h2 = conv_to_h2.proj(conv_out)
+
+    u = tensor.arange(c_sym.shape[0]).dimshuffle('x', 'x', 0)
+    u = tensor.cast(u, theano.config.floatX)
+
+    def calc_phi(k_t, a_t, b_t, u_c):
+        a_t = a_t.dimshuffle(0, 1, 'x')
+        b_t = b_t.dimshuffle(0, 1, 'x')
+        ss1 = (k_t.dimshuffle(0, 1, 'x') - u_c) ** 2
+        ss2 = -b_t * ss1
+        ss3 = a_t * tensor.exp(ss2)
+        ss4 = ss3.sum(axis=1)
+        return ss4
+
+    def step(xinp_h1_t, xgate_h1_t,
+             xinp_h2_t, xgate_h2_t,
+             h1_tm1, h2_tm1, k_tm1, w_tm1, ctx):
+        attinp_h1, attgate_h1 = att_to_h1.proj(w_tm1)
+
+        h1_t = cell1.step(xinp_h1_t + attinp_h1, xgate_h1_t + attgate_h1,
+                          h1_tm1)
+        h1inp_h2, h1gate_h2 = h1_to_h2.proj(h1_t)
+
+        a_t = h1_t.dot(h1_to_att_a)
+        b_t = h1_t.dot(h1_to_att_b)
+        k_t = h1_t.dot(h1_to_att_k)
+
+        a_t = tensor.exp(a_t)
+        b_t = tensor.exp(b_t)
+        k_t = k_tm1 + tensor.exp(k_t)
+
+        ss4 = calc_phi(k_t, a_t, b_t, u)
+        ss5 = ss4.dimshuffle(0, 1, 'x')
+        ss6 = ss5 * ctx.dimshuffle(1, 0, 2)
+        w_t = ss6.sum(axis=1)
+
+        attinp_h2, attgate_h2 = att_to_h2.proj(w_t)
+        h2_t = cell2.step(xinp_h2_t + h1inp_h2 + attinp_h2,
+                          xgate_h2_t + h1gate_h2 + attgate_h2, h2_tm1)
+        return h1_t, h2_t, k_t, w_t
+
+    (h1, h2, kappa, w), updates = theano.scan(
+        fn=step,
+        sequences=[conv_h1, convgate_h1,
+                   conv_h2, convgate_h2],
+        outputs_info=[init_h1, init_h2, init_kappa, init_w],
+        non_sequences=[context])
+    outs = h1.dot(h1_to_outs) + h2.dot(h2_to_outs)
+    theano.printing.Print("outs.shape")(outs.shape)
+
+    outs = outs.dimshuffle(1, 'x', 0 , 2)
+    theano.printing.Print("outs.shape")(outs.shape)
+
+    def _slice_mid(cmap):
+        return cmap[:, :, :, input_dim // 4:input_dim // 4 + input_dim + 1]
+
+    border_mode = "full"
+    deconv1 = conv2d(outs, w_deconv1, border_mode=border_mode)
+    deconv1 = _slice_mid(deconv1)
+    deconv1 = tanh(deconv1 + b_deconv1.dimshuffle('x', 0, 'x', 'x'))
+    theano.printing.Print("w_deconv1.shape")(w_deconv1.shape)
+    theano.printing.Print("deconv1.shape")(deconv1.shape)
+
+    depool1 = unpool(deconv1, pool_size=(2, 1))
+    theano.printing.Print("depool1.shape")(depool1.shape)
+
+    deconv2 = conv2d(depool1, w_deconv2, border_mode=border_mode)
+    deconv2 = _slice_mid(deconv2)
+    deconv2 = tanh(deconv2 + b_deconv2.dimshuffle('x', 0, 'x', 'x'))
+    theano.printing.Print("w_deconv2.shape")(w_deconv2.shape)
+    theano.printing.Print("deconv2.shape")(deconv2.shape)
+
+    depool2 = unpool(deconv2, pool_size=(2, 1))
+    deconv3 = conv2d(depool2, w_deconv3, border_mode=border_mode)
+    deconv3 = _slice_mid(deconv3)
+    deconv3 = tanh(deconv3 + b_deconv3.dimshuffle('x', 0, 'x', 'x'))
+    sliced = deconv3[:, :, :target.shape[0], :]
+    theano.printing.Print("sliced.shape")(sliced.shape)
+
+    border_mode = "full"
+    blur_conv = conv2d(sliced, w_blurconv, border_mode=border_mode)
+    blur_conv = _slice_mid(blur_conv)
+    theano.printing.Print("w_blurconv.shape")(w_blurconv.shape)
+    theano.printing.Print("blur_conv.shape")(blur_conv.shape)
+    final_conv = conv2d(blur_conv, w_finalconv, border_mode=border_mode)
+    final_conv = _slice_mid(final_conv)
+    theano.printing.Print("w_finalconv.shape")(w_finalconv.shape)
+    theano.printing.Print("final_conv.shape")(final_conv.shape)
+
+
+    """
+    # conv2d_transpose not working :( some strange bug only after optimization
+    border_mode = (0, input_dim // 2)
+    deconv1 = conv2d_transpose(outs, w_deconv1, border_mode=border_mode)
+    theano.printing.Print("w_deconv1.shape")(w_deconv1.shape)
+    theano.printing.Print("deconv1.shape")(deconv1.shape)
+
+    depool1 = unpool(deconv1, pool_size=(2, 1))
+    theano.printing.Print("depool1.shape")(depool1.shape)
+
+    deconv2 = conv2d_transpose(depool1, w_deconv2, border_mode=border_mode)
+    theano.printing.Print("w_deconv2.shape")(w_deconv2.shape)
+    theano.printing.Print("deconv2.shape")(deconv2.shape)
+
+    depool2 = unpool(deconv2, pool_size=(2, 1))
+    theano.printing.Print("depool2.shape")(depool2.shape)
+    deconv3 = conv2d(depool2, w_deconv3, border_mode=border_mode)
+    sliced = deconv3
+    theano.printing.Print("sliced.shape")(sliced.shape)
+
+    border_mode = "half"
+    blur_conv = conv2d(sliced, w_blurconv, border_mode=border_mode)
+    theano.printing.Print("w_blurconv.shape")(w_blurconv.shape)
+    theano.printing.Print("blur_conv.shape")(blur_conv.shape)
+    final_conv = conv2d(blur_conv, w_finalconv, border_mode=border_mode)
+    theano.printing.Print("w_finalconv.shape")(w_finalconv.shape)
+    theano.printing.Print("final_conv.shape")(final_conv.shape)
+    """
+
+    outs_deconv = final_conv[:, :, :, :input_dim]
+    outs_deconv = outs_deconv.dimshuffle(2, 0, 3, 1)
+    outs_deconv = outs_deconv[:target.shape[0]]
+    theano.printing.Print("outs_deconv.shape")(outs_deconv.shape)
+    preds = softmax(outs_deconv + b_softmax)
+    theano.printing.Print("preds.shape")(preds.shape)
+    theano.printing.Print("target.shape")(target.shape)
+    target = theano_one_hot(target, r=n_bins)
+    theano.printing.Print("target.shape")(target.shape)
+    cost = categorical_crossentropy(preds, target)
+    theano.printing.Print("cost.shape")(cost.shape)
+    theano.printing.Print("mask.shape")(mask.shape)
+    cost = cost * mask.dimshuffle(0, 1, 'x')
+    cost = cost.sum() / (target.shape[0] * target.shape[1])
+    grads = tensor.grad(cost, params)
+
+    init_x = as_shared(np_zeros((minibatch_size, n_out)))
+    srng = RandomStreams(1999)
+
+    """
+    # Used to calculate stopping heuristic from sections 5.3
+    u_max = 0. * tensor.arange(c_sym.shape[0]) + c_sym.shape[0]
+    u_max = u_max.dimshuffle('x', 'x', 0)
+    u_max = tensor.cast(u_max, theano.config.floatX)
+
+    def _slice_outs(outs):
+        k = n_components
+        if outs.ndim == 4:
+            def _r(i):
+                i = i.dimshuffle(0, 2, 1, 3)
+                return i.reshape((-1, i.shape[2], i.shape[3]))
+            mu = _r(outs[:, :, :, 0:k])
+            sigma = _r(outs[:, :, :, k:2 * k])
+            coeff = _r(outs[:, :, :, 2 * k:])
+        elif outs.ndim == 3:
+            mu = outs[:, :, 0:k]
+            sigma = outs[:, :, k:2 * k]
+            coeff = outs[:, :, 2 * k:]
+        else:
+            raise ValueError("Unknown ndim in _slice_outs!")
+        coeff_orig_shape = coeff.shape
+        sigma = tensor.exp(sigma - bias_sym) + 1E-6
+        coeff = tensor.nnet.softmax(
+            coeff.reshape((-1, k)) * (1. + bias_sym)) + 1E-6
+        coeff = coeff.reshape(coeff_orig_shape)
+        return mu, sigma, coeff
+
+    def sample_step(x_tm1, h1_tm1, h2_tm1, h3_tm1, k_tm1, w_tm1, ctx):
+        xinp_h1_t, xgate_h1_t = inp_to_h1.proj(x_tm1)
+        xinp_h2_t, xgate_h2_t = inp_to_h2.proj(x_tm1)
+        xinp_h3_t, xgate_h3_t = inp_to_h3.proj(x_tm1)
+
+        attinp_h1, attgate_h1 = att_to_h1.proj(w_tm1)
+
+        h1_t = cell1.step(xinp_h1_t + attinp_h1, xgate_h1_t + attgate_h1,
+                          h1_tm1)
+        h1inp_h2, h1gate_h2 = h1_to_h2.proj(h1_t)
+        h1inp_h3, h1gate_h3 = h1_to_h3.proj(h1_t)
+
+        a_t = h1_t.dot(h1_to_att_a)
+        b_t = h1_t.dot(h1_to_att_b)
+        k_t = h1_t.dot(h1_to_att_k)
+
+        a_t = tensor.exp(a_t)
+        b_t = tensor.exp(b_t)
+        k_t = k_tm1 + tensor.exp(k_t)
+
+        ss_t = calc_phi(k_t, a_t, b_t, u)
+        # calculate and return stopping criteria
+        sh_t = calc_phi(k_t, a_t, b_t, u_max)
+        ss5 = ss_t.dimshuffle(0, 1, 'x')
+        ss6 = ss5 * ctx.dimshuffle(1, 0, 2)
+        w_t = ss6.sum(axis=1)
+
+        attinp_h2, attgate_h2 = att_to_h2.proj(w_t)
+        attinp_h3, attgate_h3 = att_to_h3.proj(w_t)
+
+        h2_t = cell2.step(xinp_h2_t + h1inp_h2 + attinp_h2,
+                          xgate_h2_t + h1gate_h2 + attgate_h2, h2_tm1)
+
+        h2inp_h3, h2gate_h3 = h2_to_h3.proj(h2_t)
+
+        h3_t = cell3.step(xinp_h3_t + h1inp_h3 + h2inp_h3 + attinp_h3,
+                          xgate_h3_t + h1gate_h3 + h2gate_h3 + attgate_h3,
+                          h3_tm1)
+        out_t = h1_t.dot(h1_to_outs) + h2_t.dot(h2_to_outs) + h3_t.dot(
+            h3_to_outs)
+
+        out_t = out_t.dimshuffle(1, 0, 'x')
+        counter = tensor.arange(out_t.shape[0])
+        switch = out_t.shape[0] // 2
+
+        def sample_out_step(c_t, o_tm1, x_tm1, v_h1_tm1):
+            j_tm1 = tensor.concatenate((x_tm1, o_tm1), axis=1)
+            vinp_h1_t, vgate_h1_t = inp_to_v_h1.proj(j_tm1)
+
+            v_h1_t = v_cell1.step(vinp_h1_t, vgate_h1_t, v_h1_tm1)
+            o = v_h1_t.dimshuffle('x', 0, 'x', 1)
+            mu_mag, sigma_mag, coeff_mag = _slice_outs(o)
+            mu_phase, sigma_phase, coeff_phase = _slice_outs(o)
+            # Filthiest of the filthy hacks
+            s = tensor.ge(switch, c_t)
+            mu = s * (mu_mag) + (1 - s) * (mu_phase)
+            sigma = s * (sigma_mag) + (1 - s) * (sigma_phase)
+            coeff = s * (coeff_mag) + (1 - s) * (coeff_phase)
+            mu = mu[0].dimshuffle(0, 'x', 1)
+            sigma = sigma[0].dimshuffle(0, 'x', 1)
+            coeff = coeff[0]
+            samp_mag = sample_single_dimensional_gmms(mu, sigma, coeff, srng)
+            samp_phase = sample_single_dimensional_gmms(mu, sigma, coeff, srng)
+            samp_phase = tensor.mod(samp_phase + np.pi, 2 * np.pi) - np.pi
+            samp = s * samp_mag + (1 - s) * samp_phase
+            return samp, v_h1_t
+
+        init_corr_out = tensor.zeros((out_t.shape[1], n_density))
+        init_samp_out = tensor.zeros((out_t.shape[1], 1))
+        r, isupdates = theano.scan(
+            fn=sample_out_step,
+            sequences=[counter, out_t],
+            outputs_info=[init_samp_out, init_corr_out])
+        corr_out_t = r[0]
+        x_t = corr_out_t.dimshuffle(2, 1, 0)[0]
+        return x_t, h1_t, h2_t, h3_t, k_t, w_t, ss_t, sh_t, isupdates
+
+
+    # Uncomment for multiscan
+    (sampled, h1_s, h2_s, h3_s, k_s, w_s, stop_s, stop_h, supdates) = sample_step(
+        init_x, init_h1, init_h2, init_h3, init_kappa, init_w, c_sym)
+    """
+
+    """
+    # Old multistep code which doesn't work with updates in the internal scan
+    n_steps_sym = tensor.iscalar()
+    n_steps_sym.tag.test_value = 10
+    (sampled, h1_s, h2_s, h3_s, k_s, w_s, stop_s, stop_h), supdates = theano.scan(
+        fn=sample_step,
+        n_steps=n_steps_sym,
+        sequences=[],
+        outputs_info=[init_x, init_h1, init_h2, init_h3,
+                      init_kappa, init_w, None, None],
+        non_sequences=[context])
+    """
+
+    grads = gradient_clipping(grads, 10.)
+
+    learning_rate = 1E-4
+
+    opt = adam(params, learning_rate)
+    updates = opt.updates(params, grads)
+
+    train_function = theano.function([X_sym, X_mask_sym, c_sym, c_mask_sym,
+                                      init_h1, init_h2, init_kappa,
+                                      init_w], # bias_sym],
+                                     [cost, h1, h2, kappa, w],
+                                     updates=updates)
+    cost_function = theano.function([X_sym, X_mask_sym, c_sym, c_mask_sym,
+                                     init_h1, init_h2, init_kappa,
+                                     init_w], # bias_sym],
+                                    [cost, h1, h2, kappa, w])
+    predict_function = theano.function([X_sym, X_mask_sym, c_sym, c_mask_sym,
+                                        init_h1, init_h2, init_kappa,
+                                        init_w], # bias_sym],
+                                       [preds],
+                                       on_unused_input='warn')
+    attention_function = theano.function([X_sym, X_mask_sym, c_sym, c_mask_sym,
+                                          init_h1, init_h2, init_kappa,
+                                          init_w],
+                                         [kappa, w], on_unused_input='warn')
+    """
+    sample_function = theano.function([c_sym, c_mask_sym, init_h1, init_h2,
+                                       init_h3, init_kappa, init_w, bias_sym],
+                                      [sampled, h1_s, h2_s, h3_s, k_s, w_s,
+                                       stop_s, stop_h],
+                                      updates=supdates,
+                                      on_unused_input='warn')
+    """
+
+    checkpoint_dict = {}
+    checkpoint_dict["train_function"] = train_function
+    checkpoint_dict["cost_function"] = cost_function
+    checkpoint_dict["predict_function"] = predict_function
+    checkpoint_dict["attention_function"] = attention_function
+    #checkpoint_dict["sample_function"] = sample_function
+
+    print("Beginning training loop")
+    train_mb_count = 0
+    valid_mb_count = 0
+    start_epoch = 0
+    monitor_frequency = 1000 // minibatch_size
+    overall_train_costs = []
+    overall_valid_costs = []
+
+    if args.cont is not None:
+        continue_path = args.cont
+        if not os.path.exists(continue_path):
+            raise ValueError("Continue model %s, path not "
+                             "found" % continue_path)
+        saved_checkpoint = load_checkpoint(continue_path)
+        trained_weights = get_values_from_function(
+            saved_checkpoint["train_function"])
+        set_shared_variables_in_function(train_function, trained_weights)
+        try:
+            overall_train_costs = saved_checkpoint["overall_train_costs"]
+            overall_valid_costs = saved_checkpoint["overall_valid_costs"]
+            start_epoch = len(overall_train_costs)
+        except KeyError:
+            print("Key not found - model structure may have changed.")
+            print("Continuing anyways - statistics may not be correct!")
+
+    def _loop(function, itr):
+        prev_h1, prev_h2 = [np_zeros((minibatch_size, n_hid))
+                                     for i in range(2)]
+        prev_kappa = np_zeros((minibatch_size, att_size))
+        prev_w = np_zeros((minibatch_size, n_chars))
+        X_mb, X_mb_mask, c_mb, c_mb_mask = next(itr)
+        n_cuts = len(X_mb) // cut_len + 1
+        partial_costs = []
+        for n in range(n_cuts):
+            start = n * cut_len
+            stop = (n + 1) * cut_len
+            if len(X_mb[start:stop]) < cut_len:
+                new_len = cut_len - len(X_mb) % cut_len
+                zeros = np.zeros((new_len, X_mb.shape[1],
+                                  X_mb.shape[2]))
+                zeros = zeros.astype(X_mb.dtype)
+                mask_zeros = np.zeros((new_len, X_mb_mask.shape[1]))
+                mask_zeros = mask_zeros.astype(X_mb_mask.dtype)
+                X_mb = np.concatenate((X_mb, zeros), axis=0)
+                X_mb_mask = np.concatenate((X_mb_mask, mask_zeros), axis=0)
+                assert len(X_mb[start:stop]) == cut_len
+                assert len(X_mb_mask[start:stop]) == cut_len
+            rval = function(X_mb[start:stop],
+                            X_mb_mask[start:stop],
+                            c_mb, c_mb_mask,
+                            prev_h1, prev_h2, prev_kappa, prev_w)
+            current_cost = rval[0]
+            prev_h1, prev_h2 = rval[1:3]
+            prev_h1 = prev_h1[-1]
+            prev_h2 = prev_h2[-1]
+            prev_kappa = rval[3][-1]
+            prev_w = rval[4][-1]
+        partial_costs.append(current_cost)
+        return partial_costs
+
+run_loop(_loop, train_function, train_itr, cost_function, valid_itr,
+         n_epochs=n_epochs, checkpoint_dict=checkpoint_dict)

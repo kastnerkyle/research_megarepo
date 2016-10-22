@@ -1,0 +1,234 @@
+Experimental repository for polyphonic music synthesis
+======================================================
+
+See Primary Usage to get down to training, but the setup process is
+ VERY VERY VERY IMPORTANT. Be sure this is right.
+
+Setup
+-----
+First, install tensorflow, numpy, and clone the magenta repo 
+
+You will also need timidity and ffmpeg installed in order to sample and hear the results.
+
+Version information for everything I used can be found at the bottom of this README, different versions (should) work fine, but these are the versions I used.
+
+In order to use magenta with my codebase, you have to build it, add it to your PYTHONPATH, then add empty __init__.py files in each folder e.g. add empty files
+
+magenta/magenta/__init__.py
+magenta/magenta/lib/__init__.py
+magenta/magenta/protobuf/__init__.py
+
+Be sure to build the magenta protobuf with
+
+bazel build //magenta:protobuf:music_py_pb2
+
+Now symlink the music_pb2.py file like so
+ln -s magenta/bazel-out/local-opt/genfiles/magenta/protobuf/music_pb2.py magenta/magenta/protobuf/music_pb2.py
+
+Add magenta to your PYTHONPATH, by adding the following to eg ~/.bashrc
+
+PYTHONPATH=$PYTHONPATH:$HOME/src/magenta/
+
+where my copy of magenta was cloned into the $HOME/src directory
+
+You can test this setup by trying the following in your Python interpreter from a new terminal session (after doing all the mentioned steps).
+
+from magenta.lib.note_sequence_io import note_sequence_iterator
+from magenta.protobuf import music_pb2
+
+When all is said and done, you should be able to test run the model with
+
+python duration_rnn.py
+
+As long as training starts you should see things like the following (where ...SNIP is to denote bypassing intermediate printouts...)
+
+"""
+I tensorflow/stream_executor/dso_loader.cc:108] successfully opened CUDA library libcublas.so locally
+I tensorflow/stream_executor/dso_loader.cc:108] successfully opened CUDA library libcudnn.so locally
+I tensorflow/stream_executor/dso_loader.cc:108] successfully opened CUDA library libcufft.so locally
+I tensorflow/stream_executor/dso_loader.cc:108] successfully opened CUDA library libcuda.so locally
+I tensorflow/stream_executor/dso_loader.cc:108] successfully opened CUDA library libcurand.so locally
+Found name note_0 in shared parameters
+Found name note_1 in shared parameters
+Found name note_2 in shared parameters
+Found name note_3 in shared parameters
+Found name dur_0 in shared parameters
+Found name dur_1 in shared parameters
+Found name dur_2 in shared parameters
+Found name dur_3 in shared parameters
+True values dimension should match predicted!
+Expected (-1, 32, 89), got (-1, 32)
+Changing (-1, 32) to (-1, 32, 89) with one hot encoding
+
+...SNIP
+
+Running loops...
+Saving code archive for midi_models/training_output/duration_rnn
+I tensorflow/stream_executor/cuda/cuda_gpu_executor.cc:924] successful NUMA node read from SysFS had negative value (-1), but there must be at least one NUMA node, so returning NUMA node zero
+I tensorflow/core/common_runtime/gpu/gpu_init.cc:102] Found device 0 with properties: 
+name: GeForce GTX TITAN X
+major: 5 minor: 2 memoryClockRate (GHz) 1.2155
+pciBusID 0000:02:00.0
+Total memory: 11.92GiB
+Free memory: 11.81GiB
+
+...SNIP
+
+I tensorflow/core/common_runtime/gpu/gpu_device.cc:806] Creating TensorFlow device (/gpu:0) -> (device: 0, name: GeForce GTX TITAN X, pci bus id: 0000:02:00.0)
+I tensorflow/core/common_runtime/gpu/gpu_device.cc:793] Ignoring gpu device (device: 1, name: Quadro K620, pci bus id: 0000:03:00.0) with Cuda multiprocessor count: 3. The minimum required count is 8. You can adjust this requirement with the env var TF_MIN_GPU_MULTIPROCESSOR_COUNT.
+Total number of parameters: 0.152612M
+ 
+Starting training, epoch 0
+ 
+...SNIP
+ 
+Starting validation, epoch 0
+ 
+ 
+Host myhost, script duration_rnn.py
+Epoch 0 complete
+Epoch mean train cost 1.340860
+Epoch mean valid cost 1.023497
+Previous train costs [1.3408600061367719]
+Previous valid costs [1.0234973907470704]
+"""
+
+Description
+-----------
+See the included pdf Generating_Event_Sequences_With_RNNs.pdf for my final intern presentation
+which loosely describes the ideas behind the model.
+
+
+Data
+----
+Bach Chorales, converted to tfrecord from MusicXML from the music21 package.
+It is included here in the repo for completeness.
+
+
+Primary usage
+-------------
+It is easiest to train a model using the helper scripts
+
+./runit.sh
+
+This will train a model, select the best one based on validation set score,
+and sample from it, saving all relevant outputs to
+
+./training_outputs/some_time/*mid
+
+and
+
+./training_outputs/some_time/*wav
+
+If you have a saved model (such as in ./training_outputs/some_time/blah.ckpt) you can sample from it with
+
+./sampleit.sh path_to_ckpt_file
+
+This will sample outputs and put them in a folder called ./samples/
+
+
+Detailed summary
+----------------
+duration_rnn.py is the model description in code, as well as the training script
+
+sample_duration_rnn.py is the sampling code
+
+tfkdllib.py is a curated, Tensorflow-ified version of some common utilities
+and building blocks I wrote this summer. Some of it has overlap with what
+exists in core TF, but I am specifically wanted to know
+the details of what is happening inside the computation of these blocks.
+This is more my philosophical stance on research coding than any real
+problem - the TF versions of these operations may work better (or worse).
+
+
+Version log
+-----------
+Hopefully none of this matters for reproduction, but this is a summary of the training environment I (Kyle Kastner) used
+
+tensorflow commit e9953ee70d45bfba8083eaa7ac902714f1a0b0a5
+bazel commit 146ecf9883883a97cf9c25b0b8e478fc3e5e2c22
+magenta commit a2490ef5a47456145f7b2ca2eb13d036c1df7439
+
+CUDA:
+CUDA driver version NVIDIA-SMI 367.35 (via Google's sudo apt-get install nvidia-367)
+
+CUDNN:
+CUDNN info (output of 
+cat /usr/local/cuda/include/cudnn.h | grep CUDNN_MAJOR -A 2
+)
+#define CUDNN_MAJOR      4
+#define CUDNN_MINOR      0
+#define CUDNN_PATCHLEVEL 7
+
+PYTHON:
+Python 2.7 using Anaconda info
+Python 2.7.11 |Anaconda 4.0.0 (64-bit)| (default, Dec  6 2015, 18:08:32) 
+[GCC 4.4.7 20120313 (Red Hat 4.4.7-1)] on linux2
+
+CONDA:
+All conda packages listed in conda_information.txt 
+
+NUMPY:
+numpy version '1.10.4'
+Output of numpy.__config__.show()
+lapack_opt_info:
+    libraries = ['mkl_lapack95_lp64', 'mkl_intel_lp64', 'mkl_intel_thread', 'mkl_core', 'iomp5', 'pthread']
+    define_macros = [('SCIPY_MKL_H', None), ('HAVE_CBLAS', None)]
+blas_opt_info:
+    libraries = ['mkl_intel_lp64', 'mkl_intel_thread', 'mkl_core', 'iomp5', 'pthread']
+    define_macros = [('SCIPY_MKL_H', None), ('HAVE_CBLAS', None)]
+openblas_lapack_info:
+  NOT AVAILABLE
+lapack_mkl_info:
+    libraries = ['mkl_lapack95_lp64', 'mkl_intel_lp64', 'mkl_intel_thread', 'mkl_core', 'iomp5', 'pthread']
+    define_macros = [('SCIPY_MKL_H', None), ('HAVE_CBLAS', None)]
+blas_mkl_info:
+    libraries = ['mkl_intel_lp64', 'mkl_intel_thread', 'mkl_core', 'iomp5', 'pthread']
+    define_macros = [('SCIPY_MKL_H', None), ('HAVE_CBLAS', None)]
+mkl_info:
+    libraries = ['mkl_intel_lp64', 'mkl_intel_thread', 'mkl_core', 'iomp5', 'pthread']
+    define_macros = [('SCIPY_MKL_H', None), ('HAVE_CBLAS', None)]
+
+SCIPY:
+scipy version '0.17.0'
+Output of scipy.__config__.show()
+
+lapack_opt_info:
+    libraries = ['mkl_lapack95_lp64', 'mkl_intel_lp64', 'mkl_intel_thread', 'mkl_core', 'iomp5', 'pthread']
+    define_macros = [('SCIPY_MKL_H', None), ('HAVE_CBLAS', None)]
+blas_opt_info:
+    libraries = ['mkl_intel_lp64', 'mkl_intel_thread', 'mkl_core', 'iomp5', 'pthread']
+    define_macros = [('SCIPY_MKL_H', None), ('HAVE_CBLAS', None)]
+openblas_lapack_info:
+  NOT AVAILABLE
+lapack_mkl_info:
+    libraries = ['mkl_lapack95_lp64', 'mkl_intel_lp64', 'mkl_intel_thread', 'mkl_core', 'iomp5', 'pthread']
+    define_macros = [('SCIPY_MKL_H', None), ('HAVE_CBLAS', None)]
+blas_mkl_info:
+    libraries = ['mkl_intel_lp64', 'mkl_intel_thread', 'mkl_core', 'iomp5', 'pthread']
+    define_macros = [('SCIPY_MKL_H', None), ('HAVE_CBLAS', None)]
+mkl_info:
+    libraries = ['mkl_intel_lp64', 'mkl_intel_thread', 'mkl_core', 'iomp5', 'pthread']
+    define_macros = [('SCIPY_MKL_H', None), ('HAVE_CBLAS', None)]
+
+GCC:
+Output of gcc -v
+
+Using built-in specs.
+COLLECT_GCC=gcc
+COLLECT_LTO_WRAPPER=/usr/lib/gcc/x86_64-linux-gnu/4.8/lto-wrapper
+Target: x86_64-linux-gnu
+Configured with: ../src/configure -v --with-pkgversion='Ubuntu 4.8.4-2ubuntu1~14.04.3' --with-bugurl=file:///usr/share/doc/gcc-4.8/README.Bugs --enable-languages=c,c++,java,go,d,fortran,objc,obj-c++ --prefix=/usr --program-suffix=-4.8 --enable-shared --enable-linker-build-id --libexecdir=/usr/lib --without-included-gettext --enable-threads=posix --with-gxx-include-dir=/usr/include/c++/4.8 --libdir=/usr/lib --enable-nls --with-sysroot=/ --enable-clocale=gnu --enable-libstdcxx-debug
+--enable-libstdcxx-time=yes --enable-gnu-unique-object --disable-libmudflap --enable-plugin --with-system-zlib --disable-browser-plugin --enable-java-awt=gtk --enable-gtk-cairo --with-java-home=/usr/lib/jvm/java-1.5.0-gcj-4.8-amd64/jre --enable-java-home --with-jvm-root-dir=/usr/lib/jvm/java-1.5.0-gcj-4.8-amd64 --with-jvm-jar-dir=/usr/lib/jvm-exports/java-1.5.0-gcj-4.8-amd64 --with-arch-directory=amd64 --with-ecj-jar=/usr/share/java/eclipse-ecj.jar --enable-objc-gc
+--enable-multiarch --disable-werror --with-arch-32=i686 --with-abi=m64 --with-multilib-list=m32,m64,mx32 --with-tune=generic --enable-checking=release --build=x86_64-linux-gnu --host=x86_64-linux-gnu --target=x86_64-linux-gnu
+Thread model: posix
+gcc version 4.8.4 (Ubuntu 4.8.4-2ubuntu1~14.04.3)
+
+PLATFORM:
+output of lsb_release -a
+
+LSB Version:	core-2.0-amd64:core-2.0-noarch:core-3.0-amd64:core-3.0-noarch:core-3.1-amd64:core-3.1-noarch:core-3.2-amd64:core-3.2-noarch:core-4.0-amd64:core-4.0-noarch:core-4.1-amd64:core-4.1-noarch:cxx-3.0-amd64:cxx-3.0-noarch:cxx-3.1-amd64:cxx-3.1-noarch:cxx-3.2-amd64:cxx-3.2-noarch:cxx-4.0-amd64:cxx-4.0-noarch:cxx-4.1-amd64:cxx-4.1-noarch:desktop-3.1-amd64:desktop-3.1-noarch:desktop-3.2-amd64:desktop-3.2-noarch:desktop-4.0-amd64:desktop-4.0-noarch:desktop-4.1-amd64:desktop-4.1-noarch:graphics-2.0-amd64:graphics-2.0-noarch:graphics-3.0-amd64:graphics-3.0-noarch:graphics-3.1-amd64:graphics-3.1-noarch:graphics-3.2-amd64:graphics-3.2-noarch:graphics-4.0-amd64:graphics-4.0-noarch:graphics-4.1-amd64:graphics-4.1-noarch:languages-3.2-amd64:languages-3.2-noarch:languages-4.0-amd64:languages-4.0-noarch:languages-4.1-amd64:languages-4.1-noarch:multimedia-3.2-amd64:multimedia-3.2-noarch:multimedia-4.0-amd64:multimedia-4.0-noarch:multimedia-4.1-amd64:multimedia-4.1-noarch:printing-3.2-amd64:printing-3.2-noarch:printing-4.0-amd64:printing-4.0-noarch:printing-4.1-amd64:printing-4.1-noarch:qt4-3.1-amd64:qt4-3.1-noarch:security-4.0-amd64:security-4.0-noarch:security-4.1-amd64:security-4.1-noarch
+Distributor ID:	Ubuntu
+Description:	Ubuntu 14.04 LTS
+Release:	14.04
+Codename:	trusty

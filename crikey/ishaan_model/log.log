@@ -1,0 +1,46 @@
+Params:
+	ishaan_baseline.py_Embedding_1 (256,256)
+	ishaan_baseline.py_GRUFork_gates_W_1 (256,1536)
+	ishaan_baseline.py_GRUFork_gates_W_10 (512,1536)
+	ishaan_baseline.py_GRUFork_gates_W_13 (512,1536)
+	ishaan_baseline.py_GRUFork_gates_W_16 (512,1536)
+	ishaan_baseline.py_GRUFork_gates_W_4 (256,1536)
+	ishaan_baseline.py_GRUFork_gates_W_7 (256,1536)
+	ishaan_baseline.py_GRUFork_gates_b_12 (1536)
+	ishaan_baseline.py_GRUFork_gates_b_15 (1536)
+	ishaan_baseline.py_GRUFork_gates_b_18 (1536)
+	ishaan_baseline.py_GRUFork_gates_b_3 (1536)
+	ishaan_baseline.py_GRUFork_gates_b_6 (1536)
+	ishaan_baseline.py_GRUFork_gates_b_9 (1536)
+	ishaan_baseline.py_GRUFork_gates_wn_11 (1536)
+	ishaan_baseline.py_GRUFork_gates_wn_14 (1536)
+	ishaan_baseline.py_GRUFork_gates_wn_17 (1536)
+	ishaan_baseline.py_GRUFork_gates_wn_2 (1536)
+	ishaan_baseline.py_GRUFork_gates_wn_5 (1536)
+	ishaan_baseline.py_GRUFork_gates_wn_8 (1536)
+	ishaan_baseline.py_GRU_state_W_11 (512,512)
+	ishaan_baseline.py_GRU_state_W_3 (512,512)
+	ishaan_baseline.py_GRU_state_W_7 (512,512)
+	ishaan_baseline.py_GRU_state_wn_12 (512)
+	ishaan_baseline.py_GRU_state_wn_4 (512)
+	ishaan_baseline.py_GRU_state_wn_8 (512)
+	ishaan_baseline.py_GRU_update/reset_W_1 (512,1024)
+	ishaan_baseline.py_GRU_update/reset_W_5 (512,1024)
+	ishaan_baseline.py_GRU_update/reset_W_9 (512,1024)
+	ishaan_baseline.py_GRU_update/reset_wn_10 (1024)
+	ishaan_baseline.py_GRU_update/reset_wn_2 (1024)
+	ishaan_baseline.py_GRU_update/reset_wn_6 (1024)
+	ishaan_baseline.py_LearnedInitHidden_1 (512)
+	ishaan_baseline.py_LearnedInitHidden_2 (512)
+	ishaan_baseline.py_LearnedInitHidden_3 (512)
+	ishaan_baseline.py_Linear_W_1 (1792,256)
+	ishaan_baseline.py_Linear_b_3 (256)
+	ishaan_baseline.py_Linear_wn_2 (256)
+Total parameter count: 6.447616 M
+Running loop...
+Saving code archive for /Tmp/kastner/kdllib_dir/ishaan_baseline
+ 
+Starting training, epoch 0
+ 
+Training loop interrupted by user! Saving current best results.
+Loop finished, closing write threads (this may take a while!)
