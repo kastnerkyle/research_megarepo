@@ -1,0 +1,1213 @@
+{
+ "cells": [
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "# The unreasonable effectiveness of Character-level Language Models\n",
+    "## (and why RNNs are still cool)\n",
+    "\n",
+    "###[Yoav Goldberg](http://www.cs.biu.ac.il/~yogo)\n",
+    "\n",
+    "RNNs, LSTMs and Deep Learning are all the rage, and a recent [blog post](http://karpathy.github.io/2015/05/21/rnn-effectiveness/) by Andrej Karpathy is doing a great job explaining what these models are and how to train them.\n",
+    "It also provides some very impressive results of what they are capable of.  This is a great post, and if you are interested in natural language, machine learning or neural networks you should definitely read it. \n",
+    "\n",
+    "Go read it now, then come back here. \n",
+    "\n",
+    "You're back? good. Impressive stuff, huh? How could the network learn to immitate the input like that?\n",
+    "Indeed. I was quite impressed as well.\n",
+    "\n",
+    "However, it feels to me that most readers of the post are impressed by the wrong reasons.\n",
+    "This is because they are not familiar with **unsmoothed maximum-liklihood character level language models** and their unreasonable effectiveness at generating rather convincing natural language outputs.\n",
+    "\n",
+    "In what follows I will briefly describe these character-level maximum-likelihood langauge models, which are much less magical than RNNs and LSTMs, and show that they too can produce a rather convincing Shakespearean prose. I will also show about 30 lines of python code that take care of both training the model and generating the output. Compared to this baseline, the RNNs may seem somehwat less impressive. So why was I impressed? I will explain this too, below."
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "## Unsmoothed Maximum Likelihood Character Level Language Model \n",
+    "\n",
+    "The name is quite long, but the idea is very simple.  We want a model whose job is to guess the next character based on the previous $n$ letters. For example, having seen `ello`, the next characer is likely to be either a commma or space (if we assume is is the end of the word \"hello\"), or the letter `w` if we believe we are in the middle of the word \"mellow\". Humans are quite good at this, but of course seeing a larger history makes things easier (if we were to see 5 letters instead of 4, the choice between space and `w` would have been much easier).\n",
+    "\n",
+    "We will call $n$, the number of letters we need to guess based on, the _order_ of the language model.\n",
+    "\n",
+    "RNNs and LSTMs can potentially learn infinite-order language model (they guess the next character based on a \"state\" which supposedly encode all the previous history). We here will restrict ourselves to a fixed-order language model.\n",
+    "\n",
+    "So, we are seeing $n$ letters, and need to guess the $n+1$th one. We are also given a large-ish amount of text (say, all of Shakespear works) that we can use. How would we go about solving this task?\n",
+    "\n",
+    "Mathematiacally, we would like to learn a function $P(c | h)$. Here, $c$ is a character, $h$ is a $n$-letters history, and $P(c|h)$ stands for how likely is it to see $c$ after we've seen $h$.\n",
+    "\n",
+    "Perhaps the simplest approach would be to just count and divide (a.k.a **maximum likelihood estimates**). We will count the number of times each letter $c'$ appeared after $h$, and divide by the total numbers of letters appearing after $h$. The **unsmoothed** part means that if we did not see a given letter following $h$, we will just give it a probability of zero.\n",
+    "\n",
+    "And that's all there is to it.\n"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "### Training Code\n",
+    "Here is the code for training the model. `fname` is a file to read the characters from. `order` is the history size to consult. Note that we pad the data with leading `~` so that we also learn how to start.\n"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 41,
+   "metadata": {
+    "collapsed": true
+   },
+   "outputs": [],
+   "source": [
+    "from collections import *\n",
+    "\n",
+    "def train_char_lm(fname, order=4):\n",
+    "    data = file(fname).read()\n",
+    "    lm = defaultdict(Counter)\n",
+    "    pad = \"~\" * order\n",
+    "    data = pad + data\n",
+    "    for i in xrange(len(data)-order):\n",
+    "        history, char = data[i:i+order], data[i+order]\n",
+    "        lm[history][char]+=1\n",
+    "    def normalize(counter):\n",
+    "        s = float(sum(counter.values()))\n",
+    "        return [(c,cnt/s) for c,cnt in counter.iteritems()]\n",
+    "    outlm = {hist:normalize(chars) for hist, chars in lm.iteritems()}\n",
+    "    return outlm"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "Let's train it on Andrej's Shakespears's text:"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 42,
+   "metadata": {
+    "collapsed": false
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "--2015-05-23 02:05:18--  http://cs.stanford.edu/people/karpathy/char-rnn/shakespeare_input.txt\n",
+      "Resolving cs.stanford.edu (cs.stanford.edu)... 171.64.64.64\n",
+      "Connecting to cs.stanford.edu (cs.stanford.edu)|171.64.64.64|:80... connected.\n",
+      "HTTP request sent, awaiting response... 200 OK\n",
+      "Length: 4573338 (4.4M) [text/plain]\n",
+      "Saving to: ‘shakespeare_input.txt’\n",
+      "\n",
+      "shakespeare_input.t 100%[=====================>]   4.36M   935KB/s   in 8.8s   \n",
+      "\n",
+      "2015-05-23 02:05:49 (507 KB/s) - ‘shakespeare_input.txt’ saved [4573338/4573338]\n",
+      "\n"
+     ]
+    }
+   ],
+   "source": [
+    "!wget http://cs.stanford.edu/people/karpathy/char-rnn/shakespeare_input.txt"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 43,
+   "metadata": {
+    "collapsed": true
+   },
+   "outputs": [],
+   "source": [
+    "lm = train_char_lm(\"shakespeare_input.txt\", order=4)"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "Ok. Now let's do some queries:"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 44,
+   "metadata": {
+    "collapsed": false
+   },
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "[('!', 0.0068143100511073255),\n",
+       " (' ', 0.013628620102214651),\n",
+       " (\"'\", 0.017035775127768313),\n",
+       " (',', 0.027257240204429302),\n",
+       " ('.', 0.0068143100511073255),\n",
+       " ('r', 0.059625212947189095),\n",
+       " ('u', 0.03747870528109029),\n",
+       " ('w', 0.817717206132879),\n",
+       " ('n', 0.0017035775127768314),\n",
+       " (':', 0.005110732538330494),\n",
+       " ('?', 0.0068143100511073255)]"
+      ]
+     },
+     "execution_count": 44,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "lm['ello']"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 45,
+   "metadata": {
+    "collapsed": false
+   },
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "[('t', 1.0)]"
+      ]
+     },
+     "execution_count": 45,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "lm['Firs']"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 46,
+   "metadata": {
+    "collapsed": false
+   },
+   "outputs": [
+    {
+     "data": {
+      "text/plain": [
+       "[(\"'\", 0.0008025682182985554),\n",
+       " ('A', 0.0056179775280898875),\n",
+       " ('C', 0.09550561797752809),\n",
+       " ('B', 0.009630818619582664),\n",
+       " ('E', 0.0016051364365971107),\n",
+       " ('D', 0.0032102728731942215),\n",
+       " ('G', 0.0898876404494382),\n",
+       " ('F', 0.012038523274478331),\n",
+       " ('I', 0.009630818619582664),\n",
+       " ('H', 0.0040128410914927765),\n",
+       " ('K', 0.008025682182985553),\n",
+       " ('M', 0.0593900481540931),\n",
+       " ('L', 0.10674157303370786),\n",
+       " ('O', 0.018459069020866775),\n",
+       " ('N', 0.0008025682182985554),\n",
+       " ('P', 0.014446227929373997),\n",
+       " ('S', 0.16292134831460675),\n",
+       " ('R', 0.0008025682182985554),\n",
+       " ('T', 0.0032102728731942215),\n",
+       " ('W', 0.033707865168539325),\n",
+       " ('a', 0.02247191011235955),\n",
+       " ('c', 0.012841091492776886),\n",
+       " ('b', 0.024879614767255216),\n",
+       " ('e', 0.0032102728731942215),\n",
+       " ('d', 0.015248796147672551),\n",
+       " ('g', 0.011235955056179775),\n",
+       " ('f', 0.011235955056179775),\n",
+       " ('i', 0.016853932584269662),\n",
+       " ('h', 0.019261637239165328),\n",
+       " ('k', 0.0040128410914927765),\n",
+       " ('m', 0.02247191011235955),\n",
+       " ('l', 0.01043338683788122),\n",
+       " ('o', 0.030497592295345103),\n",
+       " ('n', 0.020064205457463884),\n",
+       " ('q', 0.0016051364365971107),\n",
+       " ('p', 0.00882825040128411),\n",
+       " ('s', 0.03290529695024077),\n",
+       " ('r', 0.0072231139646869984),\n",
+       " ('u', 0.0016051364365971107),\n",
+       " ('t', 0.05377207062600321),\n",
+       " ('w', 0.024077046548956663),\n",
+       " ('v', 0.002407704654895666),\n",
+       " ('y', 0.002407704654895666)]"
+      ]
+     },
+     "execution_count": 46,
+     "metadata": {},
+     "output_type": "execute_result"
+    }
+   ],
+   "source": [
+    "lm['rst ']"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {
+    "collapsed": true
+   },
+   "outputs": [],
+   "source": []
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "So `ello` is followed by either space, punctuation or `w` (or `r`, `u`, `n`), `Firs` is pretty much deterministic, and the word following `ist ` can start with pretty much every letter."
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "### Generating from the model\n",
+    "Generating is also very simple. To generate a letter, we will take the history, look at the last $order$ characteters, and then sample a random letter based on the corresponding distribution."
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 47,
+   "metadata": {
+    "collapsed": true
+   },
+   "outputs": [],
+   "source": [
+    "from random import random\n",
+    "\n",
+    "def generate_letter(lm, history, order):\n",
+    "        history = history[-order:]\n",
+    "        dist = lm[history]\n",
+    "        x = random()\n",
+    "        for c,v in dist:\n",
+    "            x = x - v\n",
+    "            if x <= 0: return c"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "To generate a passage of $k$ characters, we just seed it with the initial history and run letter generation in a loop, updating the history at each turn."
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 48,
+   "metadata": {
+    "collapsed": true
+   },
+   "outputs": [],
+   "source": [
+    "def generate_text(lm, order, nletters=1000):\n",
+    "    history = \"~\" * order\n",
+    "    out = []\n",
+    "    for i in xrange(nletters):\n",
+    "        c = generate_letter(lm, history, order)\n",
+    "        history = history[-order:] + c\n",
+    "        out.append(c)\n",
+    "    return \"\".join(out)"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "### Generated Shakespeare from different order models\n",
+    "\n",
+    "Let's try to generate text based on different language-model orders. Let's start with something silly:\n",
+    "\n",
+    "### order 2:"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 35,
+   "metadata": {
+    "collapsed": false
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "Fif thad yourty\n",
+      "Fare sid on Che as al my he sheace ing.\n",
+      "\n",
+      "Thy your thy ove dievest sord wit whand of sold iset?\n",
+      "\n",
+      "Commet laund hant.\n",
+      "\n",
+      "KINCESARGANT:\n",
+      "Out aboy tur Pome you musicell losts, blover.\n",
+      "\n",
+      "How difte quainge to sh,\n",
+      "And usbas ey will Chor bacterea, and mens grou:\n",
+      "Princeser,\n",
+      "'Tis a but be;\n",
+      "I hends ing noth much?\n",
+      "\n",
+      "Lo, withiell thicest to an, se nourink of a gray that, the's ge, fat a to to and requand pink my menis of lat sall favere, I whathews be frevisars.\n",
+      "FLAVIIIII:\n",
+      "Whout les: your\n",
+      "MACUS:\n",
+      "O,--\n",
+      "Hie an an thout nown mis yought, the Phimne, shappy bley\n",
+      "sirs,--Ha!\n",
+      "\n",
+      "Hart, frow mas gen the me?\n",
+      "\n",
+      "SEY:\n",
+      "Herfe, inese\n",
+      "vereat a voter'd\n",
+      "theave, shashall er, ist hem thdre of\n",
+      "mare to.\n",
+      "\n",
+      "Lovenat\n",
+      "me bree shatteed.\n",
+      "\n",
+      "Besat's the a giverve se.\n",
+      "\n",
+      "FLANY:\n",
+      "Whis I'll-volover to of you man hitinut,\n",
+      "To thadarthopeatund me wing of pourisforniners dinguent my so liked withe brave heiry, and fore ist. Fain\n",
+      "Thess kno st, will be witund nothousto yesty,\n",
+      "art To stry all son ford bas sood cal love thys; as of th tund \n"
+     ]
+    }
+   ],
+   "source": [
+    "lm = train_char_lm(\"shakespeare_input.txt\", order=2)\n",
+    "print generate_text(lm, 2)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {
+    "collapsed": true
+   },
+   "outputs": [],
+   "source": []
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "Not so great.. but what if we increase the order to 4?\n",
+    "\n",
+    "### order 4"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 36,
+   "metadata": {
+    "collapsed": false
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "First, the devishin it son?\n",
+      "\n",
+      "MONTANO:\n",
+      "'Tis true as full Squellen the rest me, my passacre. and nothink my fairs,' done to vision of actious to thy to love, brings gods!\n",
+      "\n",
+      "THUR:\n",
+      "Will comfited our flight offend make thy love;\n",
+      "Brothere is oats at on thes:'--why, cross and so\n",
+      "her shouldestruck at one their hearina in all go to lives of Costag,\n",
+      "To his he tyrant of you our the fill we hath trouble an over me?\n",
+      "\n",
+      "KING JOHN:\n",
+      "Great though I gain; for talk to mine and to the Christ: a right him out\n",
+      "To kiss;\n",
+      "And to a kindness not of loves you Gower and to the stray\n",
+      "Than hers of ever in this flight?\n",
+      "I do me,\n",
+      "After, wild,\n",
+      "Or, if I into ebbs, by fair too me knowned worship asider thyself-skin ever is again, and eat behold speak imposed thy hand. Give and cours not sweet you of sorrow then; for they are gone! Then the prince, I\n",
+      "see your likewis, is thee; and him for is them hearts, we have a kiss,\n",
+      "And it is the come, some an eanly; you that am fire: prince when 'twixt young piece, that honourish we fort\n"
+     ]
+    }
+   ],
+   "source": [
+    "lm = train_char_lm(\"shakespeare_input.txt\", order=4)\n",
+    "print generate_text(lm, 4)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 37,
+   "metadata": {
+    "collapsed": false
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "First Office, masters\n",
+      "To part at that she may direct my brance\n",
+      "I would he dead. Pleaseth profit,\n",
+      "Then we last awaked you to again,\n",
+      "Far that night I'll courteous Herneath,\n",
+      "Of circle off.\n",
+      "\n",
+      "SPEED:\n",
+      "Not you.\n",
+      "\n",
+      "DON PEDRO:\n",
+      "How to your preferment.\n",
+      "\n",
+      "DUCHESS QUICKLY:\n",
+      "Now Rome\n",
+      "Such other's chamber tears.\n",
+      "A head.\n",
+      "\n",
+      "VIRGILIA:\n",
+      "O, we show the bowls thouse two hones, if you loved: a proned speaking shrought upon that shall affect, onest, that I am a man is at Milford's worth.\n",
+      "Am boundeserts are you, or woman great that's noble upon me burth one of the well surfew-begot of thy daughed with trib, trumpet they the Sever heave down?\n",
+      "\n",
+      "First what down, on for truth of marry, which I have Troilus' mouth'd\n",
+      "To rever hang that cond Malvolio?\n",
+      "\n",
+      "EXETER:\n",
+      "Blists: but speak morn back; would your soverdities, fatherefore the pate rever mirth, let her thoughts:\n",
+      "Orsino's heard make methink, being of an Oxford or a name.\n",
+      "\n",
+      "GONZALO:\n",
+      "What I reason,\n",
+      "His known:\n",
+      "Yet I care the Moor-worm.\n",
+      "\n",
+      "DUCHESS:\n",
+      "O, partles their father not our\n"
+     ]
+    }
+   ],
+   "source": [
+    "lm = train_char_lm(\"shakespeare_input.txt\", order=4)\n",
+    "print generate_text(lm, 4)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {
+    "collapsed": true
+   },
+   "outputs": [],
+   "source": []
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "This is already quite reasonable, and reads like English. Just 4 letters history! What if we increase it to 7?\n",
+    "\n",
+    "### order 7"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 38,
+   "metadata": {
+    "collapsed": false
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "First Citizen:\n",
+      "One graves\n",
+      "Within rich Pisa walls,\n",
+      "Your noses snapper-up of uncurrent roar'd!\n",
+      "\n",
+      "HOTSPUR:\n",
+      "Hath he call you I bear; the admiration; but young.\n",
+      "\n",
+      "BIRON:\n",
+      "One word to all!\n",
+      "\n",
+      "FALSTAFF:\n",
+      "Ay, my good Lord,\n",
+      "sir?\n",
+      "\n",
+      "OCTAVIUS:\n",
+      "Philarmonus!\n",
+      "\n",
+      "Soothsayer\n",
+      "that Worthy's thumb-ring: all the green-a box.\n",
+      "\n",
+      "MISTRESS QUICKLY:\n",
+      "Ay, sir.\n",
+      "\n",
+      "CADE:\n",
+      "I would unstate\n",
+      "myself. Vexed I am one of your royal cheer yon strangers from boast:\n",
+      "And God speed?\n",
+      "\n",
+      "CHIRON:\n",
+      "And our virtue of your years, prodigious, the farthing whether deigned him already.\n",
+      "\n",
+      "Widow:\n",
+      "Your master's pleasure.\n",
+      "\n",
+      "COUNTESS:\n",
+      "Why me, Timon:\n",
+      "If he were else this do?\n",
+      "\n",
+      "FALSTAFF:\n",
+      "Prithee, be gone.\n",
+      "\n",
+      "CONSTANCE:\n",
+      "You have compiled iniquity have walked?\n",
+      "\n",
+      "Gentleman:\n",
+      "Ay, at Philip of Madam\n",
+      "Juliet, go and thou shall forth.\n",
+      "Silvia, Silvia--witness to come\n",
+      "To know in heart-string to you picked. I must nothing but valour. Do you put me to all the opening it.\n",
+      "\n",
+      "Widow:\n",
+      "Thus we met\n",
+      "My wife' there's Bohemia: who, if I were much more than my bosom\n",
+      "Be as we stay, her brav\n"
+     ]
+    }
+   ],
+   "source": [
+    "lm = train_char_lm(\"shakespeare_input.txt\", order=7)\n",
+    "print generate_text(lm, 7)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {
+    "collapsed": true
+   },
+   "outputs": [],
+   "source": []
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "### How about 10?"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 39,
+   "metadata": {
+    "collapsed": false
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "First Citizen:\n",
+      "Nay, then, that was hers,\n",
+      "It speaks against your other service:\n",
+      "But since the\n",
+      "youth of the circumstance be spoken:\n",
+      "Your uncle and one Baptista's daughter.\n",
+      "\n",
+      "SEBASTIAN:\n",
+      "Do I stand till the break off.\n",
+      "\n",
+      "BIRON:\n",
+      "Hide thy head.\n",
+      "\n",
+      "VENTIDIUS:\n",
+      "He purposeth to Athens: whither, with the vow\n",
+      "I made to handle you.\n",
+      "\n",
+      "FALSTAFF:\n",
+      "My good knave.\n",
+      "\n",
+      "MALVOLIO:\n",
+      "Sad, lady! I could be forgiven you, you're welcome. Give ear, sir, my doublet and hose and leave this present death.\n",
+      "\n",
+      "Second Gentleman:\n",
+      "Who may that she confess it is my lord enraged and forestalled ere we come to be a man. Drown thyself?\n",
+      "\n",
+      "APEMANTUS:\n",
+      "Ho, ho! I laugh to see your beard!\n",
+      "\n",
+      "BOYET:\n",
+      "Madam, in great extremes of passion as she\n",
+      "discovers it.\n",
+      "\n",
+      "PAROLLES:\n",
+      "By my white head and her wit\n",
+      "Values itself: to the sepulchre!'\n",
+      "With this, my lord,\n",
+      "That I have some business: let's away.\n",
+      "\n",
+      "First Keeper:\n",
+      "Forbear to murder: and wilt thou not say he lies,\n",
+      "And lies, and let the devil would have said, sir, their speed\n",
+      "Hath been balm to heal their woes,\n",
+      "B\n"
+     ]
+    }
+   ],
+   "source": [
+    "lm = train_char_lm(\"shakespeare_input.txt\", order=10)\n",
+    "print generate_text(lm, 10)"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "### This works pretty well\n",
+    "\n",
+    "With an order of 4, we already get quite reasonable results. Increasing the order to 7 (~word and a half of history) or 10 (~two short words of history) already gets us quite passable Shakepearan text. I'd say it is on par with the examples in Andrej's post. And how simple and un-mystical the model is!"
+   ]
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "### So why am I impressed with the RNNs after all?\n",
+    "\n",
+    "Generating English a character at a time -- not so impressive in my view. The RNN needs to learn the previous $n$ letters, for a rather small $n$, and that's it. \n",
+    "\n",
+    "However, the code-generation example is very impressive. Why? because of the context awareness. Note that in all of the posted examples, the code is well indented, the braces and brackets are correctly nested, and even the comments start and end correctly. This is not something that can be achieved by simply looking at the previous $n$ letters. \n",
+    "\n",
+    "If the examples are not cherry-picked, and the output is generally that nice, then the LSTM did learn something not trivial at all.\n",
+    "\n",
+    "Just for the fun of it, let's see what our simple language model does with the linux-kernel code:"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 49,
+   "metadata": {
+    "collapsed": false
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "--2015-05-23 02:07:59--  http://cs.stanford.edu/people/karpathy/char-rnn/linux_input.txt\n",
+      "Resolving cs.stanford.edu (cs.stanford.edu)... 171.64.64.64\n",
+      "Connecting to cs.stanford.edu (cs.stanford.edu)|171.64.64.64|:80... connected.\n",
+      "HTTP request sent, awaiting response... 200 OK\n",
+      "Length: 6206996 (5.9M) [text/plain]\n",
+      "Saving to: ‘linux_input.txt’\n",
+      "\n",
+      "linux_input.txt     100%[=====================>]   5.92M  1.10MB/s   in 9.3s   \n",
+      "\n",
+      "2015-05-23 02:08:09 (654 KB/s) - ‘linux_input.txt’ saved [6206996/6206996]\n",
+      "\n"
+     ]
+    }
+   ],
+   "source": [
+    "!wget http://cs.stanford.edu/people/karpathy/char-rnn/linux_input.txt"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 50,
+   "metadata": {
+    "collapsed": false
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "~~/*\n",
+      " * linux/kernel/time.c\n",
+      " * Please report this on hardware.\n",
+      " */\n",
+      "void irq_mark_irq(unsigned long old_entries, eval);\n",
+      "\n",
+      "\t\t/*\n",
+      "\t\t * Divide only 1000 for ns^2 -> us^2 conversion values don't overflow:\n",
+      "\t\tseq_puts(m, \"\\ttramp: %pS\",\n",
+      "\t\t\t\t\t(void *)class->contending_point]++;\n",
+      "\tif (likely(t->flags & WQ_UNBOUND)) {\n",
+      "\t\t/*\n",
+      "\t\t * Update inode information. If the\n",
+      "\t\t * slowpath and sleep time (abs or rel)\n",
+      " * @rmtp: remaining (either due\n",
+      " * to consume the state of ring buffer size. */\n",
+      "\theader_size - size, in bytes, of the chain.\n",
+      "\t\t */\n",
+      "\t\tBUG_ON(!error);\n",
+      "\t\t} while (cgrp) {\n",
+      "\t\tif (old) {\n",
+      "\t\tif (kdb_continue_catastrophic;\n",
+      "#endif\n",
+      "\n",
+      "/*\n",
+      " * for the deadlock.\\n\");\n",
+      "\t\treturn 0;\n",
+      "}\n",
+      "#endif\n",
+      "\n",
+      "\tif (!info->hdr)))\n",
+      "\t\treturn diag;\n",
+      "\t\t}\n",
+      "\t\t/* We are sharing problem where roundup (the collection is\n",
+      "\t\t * better readable */\n",
+      "\tfor (i = 0; i < rp->maxactive = max_t(u64, delay, 10000LL);\n",
+      "\t__hrtimer_get_res - get the timer\n",
+      " * @timer:\thrtimer to sched_clock_data *my_rdp)\n",
+      "{\n",
+      "\tbool oneshot = tick_oneshot_mask, GFP_KERNEL)) {\n",
+      "\t\tfree_cpumask_v\n"
+     ]
+    }
+   ],
+   "source": [
+    "lm = train_char_lm(\"linux_input.txt\", order=10)\n",
+    "print generate_text(lm, 10)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 51,
+   "metadata": {
+    "collapsed": false
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "~/*\n",
+      " * linux/kernel/power/snapshot.c\n",
+      " *\n",
+      " * This file is licensed under the terms of the GNU General Public License for more detailed information\n",
+      " * on memory ordering guarantees\n",
+      " * cgroups with bigger numbers are newer than those with smaller numbers.\n",
+      " * Also, as csses are always appended to the parent, and put the ref when\n",
+      "\t\t\t * this cgroup is being freed, so let's make sure that\n",
+      " * every task struct that event->ctx->task could possibly point to\n",
+      " * remains valid.  This condition is satisfied when called through\n",
+      " * perf_event_init_context(child, ctxn);\n",
+      "\t\tif (ret) {\n",
+      "\t\t\tpr_err(\"Module len %lu truncated\\n\", info->len);\n",
+      "\t\t\treturn -ENOMEM;\n",
+      "\n",
+      "\tenv->prog = *prog;\n",
+      "\n",
+      "\t/* grab the mutex to protect coming/going of the the jump_label table */\n",
+      "static const struct user_regset *\n",
+      "find_regset(const struct cpumask *cpu_map)\n",
+      "{\n",
+      "\tint i;\n",
+      "\n",
+      "\tif (diag >= 0) {\n",
+      "\t\tkdb_printf(\"go must execute on the entry cpu, \"\n",
+      "\t\t\t   \"please use \\\"cpu %d\\\" and then execute go\\n\",\n",
+      "\t\t\t   kdb_initial_cpu.  Used to\n",
+      " * single threaded, \n"
+     ]
+    }
+   ],
+   "source": [
+    "lm = train_char_lm(\"linux_input.txt\", order=15)\n",
+    "print generate_text(lm, 15)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 52,
+   "metadata": {
+    "collapsed": false
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "/*\n",
+      " * linux/kernel/irq/spurious.c\n",
+      " *\n",
+      " * Copyright (C) 2004 Nadia Yvette Chambers\n",
+      " */\n",
+      "\n",
+      "#include <linux/irq.h>\n",
+      "#include <linux/mutex.h>\n",
+      "#include <linux/capability.h>\n",
+      "#include <linux/suspend.h>\n",
+      "#include <linux/shm.h>\n",
+      "\n",
+      "#include <asm/uaccess.h>\n",
+      "#include <linux/interrupt.h>\n",
+      "#include \"kdb_private.h\"\n",
+      "\n",
+      "/*\n",
+      " * Table of kdb_breakpoints\n",
+      " */\n",
+      "kdb_bp_t kdb_breakpoints[KDB_MAXBPT];\n",
+      "\n",
+      "static void kdb_setsinglestep(struct pt_regs *regs)\n",
+      "{\n",
+      "\tstruct swevent_htable *swhash = &per_cpu(swevent_htable, cpu);\n",
+      "\n",
+      "\tmutex_lock(&swhash->hlist_mutex);\n",
+      "\tswhash->online = true;\n",
+      "\tif (swhash->hlist_refcount)\n",
+      "\t\tswevent_hlist_release(swhash);\n",
+      "\n",
+      "\tmutex_unlock(&show_mutex);\n",
+      "\n",
+      "\treturn 0;\n",
+      "}\n",
+      "\n",
+      "/*\n",
+      " * Unshare file descriptor table if it is being shared\n",
+      " */\n",
+      "static int unshare_fs(unsigned long unshare_flags, struct cred **new_cred)\n",
+      "{\n",
+      "\tstruct cred *cred = current_cred();\n",
+      "\n",
+      "\tretval = -EPERM;\n",
+      "\tif (rgid != (gid_t) -1) {\n",
+      "\t\tif (gid_eq(old->gid, kegid) ||\n",
+      "\t\t    gid_eq(old->sgid, kegid) ||\n",
+      "\t\t    gid_eq(old->sgid, kegid) ||\n",
+      "\t\t    gid_eq(old->egid, \n"
+     ]
+    }
+   ],
+   "source": [
+    "lm = train_char_lm(\"linux_input.txt\", order=20)\n",
+    "print generate_text(lm, 20)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 53,
+   "metadata": {
+    "collapsed": false
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "/*\n",
+      " * linux/kernel/irq/chip.c\n",
+      " *\n",
+      " * Copyright 2003-2004 Red Hat Inc., Durham, North Carolina.\n",
+      " * All Rights Reserved.\n",
+      " * Copyright (c) 2009 Wind River Systems, Inc.\n",
+      " * Copyright (C) 2008 Thomas Gleixner <tglx@timesys.com>\n",
+      " *\n",
+      " * This code is based on David Mills's reference nanokernel\n",
+      " * implementation. It was mostly rewritten but keeps the same idea.\n",
+      " */\n",
+      "void __hardpps(const struct timespec *tp)\n",
+      "{\n",
+      "\tktime_get_real_ts(tp);\n",
+      "\treturn 0;\n",
+      "}\n",
+      "\n",
+      "/*\n",
+      " * Walks through iomem resources and calls func() with matching resource\n",
+      " * ranges. This walks through whole tree and not just first level children.\n",
+      " * All the memory ranges which overlap start,end and also match flags and\n",
+      " * name are valid candidates.\n",
+      " *\n",
+      " * @name: name of resource\n",
+      " * @flags: resource flags\n",
+      " * @start: start addr\n",
+      " * @end: end addr\n",
+      " */\n",
+      "int walk_iomem_res(char *name, unsigned long val);\n",
+      "\n",
+      "static int alloc_snapshot(struct trace_array *tr)\n",
+      "{\n",
+      "\tstruct dentry *d_tracer;\n",
+      "\n",
+      "\td_tracer = tracing_init_dentry(void)\n",
+      "{\n",
+      "\tstruct trace_array *tr = wakeup_t\n"
+     ]
+    }
+   ],
+   "source": [
+    "print generate_text(lm, 20)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": 55,
+   "metadata": {
+    "collapsed": false
+   },
+   "outputs": [
+    {
+     "name": "stdout",
+     "output_type": "stream",
+     "text": [
+      "/*\n",
+      " * linux/kernel/irq/resend.c\n",
+      " *\n",
+      " * Copyright (C) 2008 Steven Rostedt <srostedt@redhat.com>\n",
+      " * Copyright (C) 2002 Khalid Aziz <khalid_aziz@hp.com>\n",
+      " * Copyright (C) 2002 Richard Henderson\n",
+      "   Copyright (C) 2001 Rusty Russell, 2002, 2010 Rusty Russell IBM.\n",
+      "\n",
+      "    This program is distributed in the hope that it will be useful,\n",
+      " * but WITHOUT ANY WARRANTY; without even the implied warranty of\n",
+      "* MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the\n",
+      " * GNU General Public License as published by the Free Software Foundation, Inc.,\n",
+      " * 51 Franklin St - Fifth Floor, Boston, MA  02110-1301  USA\n",
+      " *\n",
+      " */\n",
+      "#include <linux/cpuset.h>\n",
+      "#include <linux/sched/deadline.h>\n",
+      "#include <linux/ioport.h>\n",
+      "#include <linux/fs.h>\n",
+      "#include <linux/export.h>\n",
+      "#include <linux/mm.h>\n",
+      "#include <linux/ptrace.h>\n",
+      "#include <linux/profile.h>\n",
+      "#include <linux/smp.h>\n",
+      "#include <linux/proc_fs.h>\n",
+      "#include <linux/interrupt.h>\n",
+      "#include \"kdb_private.h\"\n",
+      "\n",
+      "/*\n",
+      " * Table of kdb_breakpoints\n",
+      " */\n",
+      "kdb_bp_t kdb_breakpoints[KDB_MAXBPT];\n",
+      "\n",
+      "static void kdb_setsinglestep(struct pt_regs *regs);\n",
+      "static int uretprobe_dispatcher(struct uprobe_consumer *con;\n",
+      "\tint ret = -ENOENT;\n",
+      "\n",
+      "\tdo {\n",
+      "\t\tspin_lock(&hash_lock);\n",
+      "\tif (tree->goner) {\n",
+      "\t\tspin_unlock(&hash_lock);\n",
+      "\t\t\tfsnotify_put_mark(&parent->mark);\n",
+      "}\n",
+      "\n",
+      "static void cpu_cgroup_css_offline,\n",
+      "\t.fork\t\t= cpu_cgroup_fork,\n",
+      "\t.can_attach\t= cpu_cgroup_can_attach(struct cgroup_subsys_state *last;\n",
+      "\n",
+      "\tdo {\n",
+      "\t\tlast = pos;\n",
+      "\t\t/* ->prev isn't RCU safe, walk ->next till the end */\n",
+      "\t\tpos = NULL;\n",
+      "\t\tcss_for_each_child(pos, css) {\n",
+      "\t\tstruct freezer *parent = parent_freezer(freezer);\n",
+      "\n",
+      "\tmutex_lock(&freezer_mutex);\n",
+      "\trcu_read_lock();\n",
+      "\tlist_for_each_entry_safe(owatch, nextw, &parent->watches, wlist) {\n",
+      "\t\tif (audit_compare_dname_path(const char *dname, const char *path, int parentlen)\n",
+      "{\n",
+      "\tint dlen, pathlen;\n",
+      "\tconst char *p;\n",
+      "\n",
+      "\tdlen = strlen(dname);\n",
+      "\tpathlen = strlen(path);\n",
+      "\tif (pathlen < dlen)\n",
+      "\t\treturn 1;\n",
+      "\n",
+      "\tparentlen = parentlen == AUDIT_NAME_FULL ? parent_len(path) : parentlen;\n",
+      "\tif (pathlen - parentlen != dlen)\n",
+      "\t\treturn 1;\n",
+      "\n",
+      "\tp = path + parentlen;\n",
+      "\n",
+      "\treturn strncmp(p, dname, dlen);\n",
+      "}\n",
+      "\n",
+      "static int audit_log_pid_context(context, context->target_pid,\n",
+      "\t\t\t\t  context->target_sessionid,\n",
+      "\t\t\t\t  context->target_auid, context->target_uid,\n",
+      "\t\t\t\t  context->target_sessionid,\n",
+      "\t\t\t\t  context->target_sid, context->target_comm, t->comm, TASK_COMM_LEN);\n",
+      "\t\treturn 0;\n",
+      "\t}\n",
+      "\n",
+      "\tspin_lock_mutex(&lock->wait_lock, flags);\n",
+      "\t\tschedule();\n",
+      "\t\traw_spin_lock_init(&rq->lock);\n",
+      "\t\trq->nr_running = 0;\n",
+      "\t\trq->calc_load_active = nr_active;\n",
+      "\t}\n",
+      "\n",
+      "\treturn delta;\n",
+      "}\n",
+      "\n",
+      "/*\n",
+      " * a1 = a0 * e + a * (1 - e)) * e + a * (1 - e)\n",
+      " *    = (a0 * e^2 + a * (1 - e) * (1 - e^n)/(1 - e)\n",
+      " *    = a0 * e^2 + a * (1 - e) * (1 + e + ... + e^n-1) [1]\n",
+      " *    = a0 * e^n + a * (1 - e) * (1 + e + e^2)\n",
+      " *\n",
+      " *  ...\n",
+      " *\n",
+      " * an = a0 * e^n + a * (1 - e) * (1 + e + ... + e^n-1) [1]\n",
+      " *    = a0 * e^n + a * (1 - e) * (1 + e)\n",
+      " *\n",
+      " * a3 = a2 * e + a * (1 - e)\n",
+      " *\n",
+      " * a2 = a1 * e + a * (1 - e)\n",
+      " *    = (a0 * e^2 + a * (1 - e) * (1 - e^n)/(1 - e)\n",
+      " *    = a0 * e^2 + a * (1 - e) * (1 + e + e^2)\n",
+      " *\n",
+      " *  ...\n",
+      " *\n",
+      " * an = a0 * e^n + a * (1 - e^n)\n",
+      " *\n",
+      " * [1] application of the geometric series:\n",
+      " *\n",
+      " *                        is not a '0' or '1')\\n\");\n",
+      "}\n",
+      "\n",
+      "static void *l_start(struct seq_file *file, void *v, loff_t *offset)\n",
+      "{\n",
+      "\tunsigned long flags;\n",
+      "\n",
+      "\tspin_lock_irqsave(&timekeeper_lock, flags);\n",
+      "\tif (global_trace.stop_count;\n",
+      "}\n",
+      "\n",
+      "/**\n",
+      " * tracing_is_enabled - Show if global_trace has been disabled\n",
+      " *\n",
+      " * Shows if the global trace has been enabled or not. It uses the\n",
+      " * mirror flag \"buffer_disabled\" to be used in fast paths such as for\n",
+      " * the irqsoff tracer. But it may be inaccurate due to races. If you\n",
+      " * need to know the accurate state, use tracing_is_on() which is a little\n",
+      " * slower, but accurate.\n",
+      " */\n",
+      "int tracing_is_enabled())\n",
+      "\t\ttracer_enabled = 0;\n",
+      "\n",
+      "\tunregister_wakeup_function(tr, graph, 0);\n",
+      "\n",
+      "\tif (!ret && tracing_is_enabled())\n",
+      "\t\treturn;\n",
+      "\n",
+      "\tlocal_irq_save(flags);\n",
+      "\tgdbstub_msg_write(s, count);\n",
+      "\tlocal_irq_restore(flags);\n",
+      "\t}\n",
+      "\n",
+      "\t/* -ENOENT from try_to_grab_pending(work, is_dwork, &flags);\n",
+      "\t\t/*\n",
+      "\t\t * If someone else is already canceling, wait for it to\n",
+      "\t\t * finish.  flush_work() doesn't work for PREEMPT_NONE\n",
+      "\t\t * because we may get scheduled between @work's completion\n",
+      "\t\t * and the other canceling task resuming and clearing\n",
+      "\t\t * CANCELING - flush_work() will return false immediately\n",
+      "\t\t * as @work is no longer busy, try_to_grab_pending(struct work_struct *work)\n",
+      "{\n",
+      "\tunsigned long data = atomic_long_read(&rsp->expedited_done);\n",
+      "\t\tif (ULONG_CMP_GE(jiffies,\n",
+      "\t\t\t rdp->rsp->gp_start + 2, jiffies))\n",
+      "\t\treturn 0;  /* Grace period is not old enough. */\n",
+      "\tbarrier();\n",
+      "\tif (local_read(&cpu_buffer_a->committing))\n",
+      "\t\tgoto out_dec;\n",
+      "\tif (local_read(&cpu_buffer->overrun);\n",
+      "\t\t\tlocal_sub(BUF_PAGE_SIZE, &cpu_buffer->entries_bytes);\n",
+      "\n",
+      "\t\t/*\n",
+      "\t\t * The entries will be zeroed out when we move the\n",
+      "\t\t * tail page.\n",
+      "\t\t */\n",
+      "\n",
+      "\t\t/* still more to do */\n",
+      "\t\tbreak;\n",
+      "\n",
+      "\tcase RB_PAGE_UPDATE:\n",
+      "\t\t/*\n",
+      "\t\t * This is not really a fixup. The work struct was\n",
+      "\t\t * statically initialized. We just make sure that it\n",
+      "\t\t * is tracked in the object tracker.\n",
+      "\t\t\t */\n",
+      "\t\t\tdebug\n"
+     ]
+    }
+   ],
+   "source": [
+    "print generate_text(lm, 20, nletters=5000)"
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {
+    "collapsed": true
+   },
+   "outputs": [],
+   "source": []
+  },
+  {
+   "cell_type": "markdown",
+   "metadata": {},
+   "source": [
+    "Order 10 is pretty much junk. In order 15 things sort-of make sense, but we jump abruptly between the \n",
+    "and by order 20 we are doing quite nicely -- but are far from keeping good indentation and brackets. \n",
+    "\n",
+    "How could we? we do not have the memory, and these things are not modeled at all. While we could quite easily enrich our model to support also keeping track of brackets and indentation (by adding information such as \"have I seen ( but not )\" to the conditioning history), this requires extra work, non-trivial human reasoning, and will make the model significantly more complex. \n",
+    "\n",
+    "The LSTM, on the other hand, seemed to have just learn it on its own. And that's impressive."
+   ]
+  },
+  {
+   "cell_type": "code",
+   "execution_count": null,
+   "metadata": {
+    "collapsed": true
+   },
+   "outputs": [],
+   "source": []
+  }
+ ],
+ "metadata": {
+  "kernelspec": {
+   "display_name": "Python 2",
+   "language": "python",
+   "name": "python2"
+  },
+  "language_info": {
+   "codemirror_mode": {
+    "name": "ipython",
+    "version": 2
+   },
+   "file_extension": ".py",
+   "mimetype": "text/x-python",
+   "name": "python",
+   "nbconvert_exporter": "python",
+   "pygments_lexer": "ipython2",
+   "version": "2.7.9"
+  }
+ },
+ "nbformat": 4,
+ "nbformat_minor": 0
+}

@@ -1,0 +1,2 @@
+for i in */*; do cp $i $(basename $i); done
+rm -rf */
