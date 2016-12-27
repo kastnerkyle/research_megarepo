@@ -5,7 +5,7 @@
 
 import json
 from six.moves import urllib
-from subprocess import call, Popen, PIPE 
+from subprocess import call, Popen, PIPE
 import os
 import math
 import shutil
@@ -30,6 +30,8 @@ f=open('./contents.txt', 'w+')
 GIT_COMMIT_FIELDS = ['id', 'author_name', 'author_email', 'date', 'message']
 GIT_LOG_FORMAT = ['%H', '%an', '%ae', '%ad', '%s']
 GIT_LOG_FORMAT = '%x1f'.join(GIT_LOG_FORMAT) + '%x1e'
+
+lu_file = open("./README.md", "w")
 
 include_pure_forks = False
 
@@ -78,8 +80,8 @@ for page in range(pages):
                        copynames[i] = copynames[i] + "_%i" % i
                os.chdir(dumpdir)
                for f, c in zip(filenames, copynames):
-                   orig = gistd + os.sep + f
-	           shutil.copy2(orig, c + ".py")
-                   os.symlink(c + ".py", f)
+                   orig = f
+	           shutil.copy2(gistd + "/" + orig, orig)
+                   lu_file.writelines(["%s : https://gist.github.com/kastnerkyle/%s\n" % (orig, gistd)])
 	       shutil.rmtree(gistd)
         os.chdir(dumpdir)
