@@ -82,6 +82,6 @@ for page in range(pages):
                for f, c in zip(filenames, copynames):
                    orig = f
 	           shutil.copy2(gistd + "/" + orig, orig)
-                   lu_file.writelines(["%s : https://gist.github.com/kastnerkyle/%s\n" % (orig, gistd)])
+                   lu_file.writelines(["%s : https://gist.github.com/kastnerkyle/%s\n\n" % (orig, gistd)])
 	       shutil.rmtree(gistd)
         os.chdir(dumpdir)
